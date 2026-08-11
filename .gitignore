@@ -1,0 +1,4 @@
+/target
+/node_modules
+/tests_folder
+Cargo.lock

@@ -1,0 +1,8 @@
+[settings]
+recursive = true
+dry_run = false
+display_path = false
+
+[targets]
+include = ["node_modules", "target"]
+exclude = ["vendor"]
