@@ -5,13 +5,16 @@ use anyhow::Result;
 use bytesize::ByteSize;
 use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
-use std::{path::{Path, PathBuf}, time::Duration};
+use privesc::PrivilegedCommand;
+use std::{
+    path::{Path, PathBuf},
+    time::Duration,
+};
 use walkdir::{DirEntry, WalkDir};
 
 use crate::clean_config::CleanConfig;
 
 pub const CONFIG_FILE_NAME: &'static str = "clean.toml";
-
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -30,48 +33,100 @@ struct Args {
     /// Display the Path of each found Folder / File that is matched to be deleted
     #[arg(short = 'p', long)]
     display_path: bool,
-    
 }
 
 enum MatchedPath {
     File { entry: DirEntry, size: u64 },
-    Folder { entry: DirEntry, size: u64 }
+    Folder { entry: DirEntry, size: u64 },
 }
 
 impl MatchedPath {
     pub fn size(&self) -> u64 {
         match self {
-            Self::File { size, .. } | Self::Folder { size , ..} => *size
+            Self::File { size, .. } | Self::Folder { size, .. } => *size,
         }
     }
 
     pub fn erase(&self, pb: &mut ProgressBar) -> Result<()> {
         match self {
             Self::File { entry, size } => {
-                std::fs::remove_file(entry.path())?;
+                if !std::fs::remove_file(entry.path()).is_ok() {
+                    let cmd_str = r"powershell.exe";
+
+                    let status = if cfg!(target_os = "windows") {
+                        PrivilegedCommand::new(cmd_str)
+                            .arg("-Command")
+                            .arg(format!(
+                                "Remove-Item -LiteralPath '{}' -Force -Recurse",
+                                entry.path().display()
+                            ))
+                            .gui(true)
+                            .run()?
+                    } else {
+                        PrivilegedCommand::new("rm")
+                            .arg("-f")
+                            .arg(entry.path().to_str().unwrap())
+                            .gui(true)
+                            .prompt(format!(
+                                "O programa precisa de permissão para remover o arquivo: {}",
+                                entry.file_name().to_str().unwrap()
+                            ))
+                            .run()?
+                    };
+
+                    if !status.success() {
+                        println!("Aviso, a remoção falhou para o caminho {}", entry.path().display());
+                    }
+                }
                 pb.inc(*size);
-            },
+            }
             Self::Folder { entry, .. } => {
+
+                let cmd_str = r"powershell.exe";
+
                 let files: Vec<(PathBuf, u64)> = WalkDir::new(entry.path())
                     .min_depth(1)
                     .into_iter()
                     .filter_map(|e| e.ok())
                     .filter(|e| e.path().is_file())
                     .map(|e| {
-                        let size = e.metadata().map(|m| m.len())
-                            .unwrap_or(0);
+                        let size = e.metadata().map(|m| m.len()).unwrap_or(0);
                         (e.into_path(), size)
                     })
                     .collect();
 
                 for (path, size) in files {
-                    std::fs::remove_file(&path)?;
+                    if !std::fs::remove_file(&path).is_ok() {
+                        let status = if cfg!(target_os = "windows") {
+                            PrivilegedCommand::new(cmd_str)
+                                .arg("-Command")
+                                .arg(format!(
+                                    "Remove-Item -LiteralPath '{}' -Force -Recurse",
+                                    entry.path().display()
+                                ))
+                                .gui(true)
+                                .run()?
+                        } else {
+                            PrivilegedCommand::new("rm")
+                                .arg("-f")
+                                .arg(entry.path().to_str().unwrap())
+                                .gui(true)
+                                .prompt(format!(
+                                    "O programa precisa de permissão para remover o arquivo: {}",
+                                    entry.file_name().to_str().unwrap()
+                                ))
+                                .run()?
+                        };
+
+                        if !status.success() {
+                            println!("Aviso, a remoção falhou para o caminho {}", entry.path().display());
+                        }
+                    }
                     pb.inc(size);
                 }
 
                 std::fs::remove_dir_all(entry.path())?;
             }
-            
         }
 
         Ok(())
@@ -86,12 +141,19 @@ impl MatchedPath {
 
     pub fn display_path(&self) {
         match self {
-            Self::File { entry, .. } => println!("Matched Path: {} {}", entry.path().display(), ByteSize(self.size())),
-            Self::Folder { entry, .. } => println!("Matched Path: {} {}", entry.path().display(), ByteSize(self.size())),            
+            Self::File { entry, .. } => println!(
+                "Matched Path: {} {}",
+                entry.path().display(),
+                ByteSize(self.size())
+            ),
+            Self::Folder { entry, .. } => println!(
+                "Matched Path: {} {}",
+                entry.path().display(),
+                ByteSize(self.size())
+            ),
         }
     }
 }
-
 
 fn dir_size(path: &PathBuf) -> u64 {
     WalkDir::new(path)
@@ -107,10 +169,12 @@ fn validate_match(path: &Path, match_paths: &Vec<String>, not_match_paths: &Vec<
         .components()
         .filter_map(|c| c.as_os_str().to_str())
         .collect();
-    
-    
+
     for n_m_path in not_match_paths {
-        if segments.iter().any(|s| s == n_m_path || s.ends_with(n_m_path)) {
+        if segments
+            .iter()
+            .any(|s| s == n_m_path || s.ends_with(n_m_path))
+        {
             return false;
         }
     }
@@ -131,13 +195,12 @@ fn main() -> Result<()> {
 
     let mut config = CleanConfig::default();
 
-    
     config.configure(path.clone(), CONFIG_FILE_NAME)?;
 
     if args.dry_run {
         config.settings.dry_run = args.dry_run;
     }
-    
+
     if args.recursive {
         config.settings.recursive = args.recursive;
     }
@@ -160,17 +223,20 @@ fn main() -> Result<()> {
         let entry = entry_res?;
         let path_str = match entry.path().to_str() {
             Some(v) => v,
-            None => continue
+            None => continue,
         };
 
         if path_str.contains(CONFIG_FILE_NAME) {
             continue;
         }
 
-        let matched = validate_match(entry.path(), &config.targets.include, &config.targets.exclude);
+        let matched = validate_match(
+            entry.path(),
+            &config.targets.include,
+            &config.targets.exclude,
+        );
 
         if matched {
-            
             let mut already_matched = false;
 
             // Validar se já foi inserido.
@@ -178,20 +244,20 @@ fn main() -> Result<()> {
             for mp in &matched_paths {
                 let mp_path: &Path = mp.get_path();
 
-
                 match mp_path.to_str() {
                     Some(v) => {
                         if path_str.contains(v) {
                             already_matched = true;
                             break;
                         }
-                    },
-                    None => continue
+                    }
+                    None => continue,
                 }
+            }
 
-            } 
-
-            if already_matched { continue; }
+            if already_matched {
+                continue;
+            }
 
             if entry.path().is_file() {
                 matched_paths.push(MatchedPath::File {
@@ -204,14 +270,12 @@ fn main() -> Result<()> {
                     size: dir_size(&entry.clone().into_path()),
                 });
             }
-
         }
     }
 
     spinner.finish_with_message("Scanning complete.");
 
     let mut full_erase_size: u64 = 0;
-
 
     matched_paths.iter().for_each(|mp| {
         if config.settings.display_path {
@@ -224,7 +288,7 @@ fn main() -> Result<()> {
     if full_erase_size == 0 {
         println!("Nothing to erase.");
         println!("Exiting.....");
-        return Ok(())
+        return Ok(());
     }
 
     println!("AMOUNT OF SIZE TO CLEAR - {}", ByteSize(full_erase_size));
@@ -234,18 +298,18 @@ fn main() -> Result<()> {
     }
 
     println!("Start Cleaning Process...");
-    
+
     let mut pb = ProgressBar::new(full_erase_size);
-    
-    pb.set_style(
-        ProgressStyle::with_template("{bar:40} {bytes}/{total_bytes}")?
-    );
-    
+
+    pb.set_style(ProgressStyle::with_template(
+        "{bar:40} {bytes}/{total_bytes}",
+    )?);
+
     for mp in matched_paths.iter() {
         mp.erase(&mut pb)?;
     }
-    
+
     pb.finish_with_message("Process finished.");
-    
+
     Ok(())
 }
