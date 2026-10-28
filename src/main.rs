@@ -51,19 +51,19 @@ impl MatchedPath {
         match self {
             Self::File { entry, size } => {
                 if !std::fs::remove_file(entry.path()).is_ok() {
-                    let cmd_str = r"powershell.exe";
-
-                    let status = if cfg!(target_os = "windows") {
-                        PrivilegedCommand::new(cmd_str)
+                    let status: bool = if cfg!(target_os = "windows") {
+                        let s = runas::Command::new("powershell")
                             .arg("-Command")
                             .arg(format!(
                                 "Remove-Item -LiteralPath '{}' -Force -Recurse",
                                 entry.path().display()
                             ))
-                            .gui(true)
-                            .run()?
+                            .force_prompt(true)
+                            .status()?;
+
+                        if s.success() { true } else { false }
                     } else {
-                        PrivilegedCommand::new("rm")
+                        let s = PrivilegedCommand::new("rm")
                             .arg("-f")
                             .arg(entry.path().to_str().unwrap())
                             .gui(true)
@@ -71,19 +71,21 @@ impl MatchedPath {
                                 "O programa precisa de permissão para remover o arquivo: {}",
                                 entry.file_name().to_str().unwrap()
                             ))
-                            .run()?
+                            .run()?;
+
+                        if s.success() { true } else { false }
                     };
 
-                    if !status.success() {
-                        println!("Aviso, a remoção falhou para o caminho {}", entry.path().display());
+                    if !status {
+                        println!(
+                            "Aviso, a remoção falhou para o caminho {}",
+                            entry.path().display()
+                        );
                     }
                 }
                 pb.inc(*size);
             }
             Self::Folder { entry, .. } => {
-
-                let cmd_str = r"powershell.exe";
-
                 let files: Vec<(PathBuf, u64)> = WalkDir::new(entry.path())
                     .min_depth(1)
                     .into_iter()
@@ -97,35 +99,66 @@ impl MatchedPath {
 
                 for (path, size) in files {
                     if !std::fs::remove_file(&path).is_ok() {
-                        let status = if cfg!(target_os = "windows") {
-                            PrivilegedCommand::new(cmd_str)
+                        let status: bool = if cfg!(target_os = "windows") {
+                            let s = runas::Command::new("powershell")
                                 .arg("-Command")
                                 .arg(format!(
                                     "Remove-Item -LiteralPath '{}' -Force -Recurse",
-                                    entry.path().display()
+                                    path.display()
                                 ))
-                                .gui(true)
-                                .run()?
+                                .status()?;
+
+                            if s.success() { true } else { false }
                         } else {
-                            PrivilegedCommand::new("rm")
+                            let s = PrivilegedCommand::new("rm")
                                 .arg("-f")
-                                .arg(entry.path().to_str().unwrap())
+                                .arg(path.display().to_string())
                                 .gui(true)
                                 .prompt(format!(
                                     "O programa precisa de permissão para remover o arquivo: {}",
-                                    entry.file_name().to_str().unwrap()
+                                    path.display()
                                 ))
-                                .run()?
+                                .run()?;
+
+                            if s.success() { true } else { false }
                         };
 
-                        if !status.success() {
-                            println!("Aviso, a remoção falhou para o caminho {}", entry.path().display());
+                        if !status {
+                            println!("Aviso, a remoção falhou para o caminho {}", path.display());
                         }
                     }
                     pb.inc(size);
                 }
 
-                std::fs::remove_dir_all(entry.path())?;
+                if !std::fs::remove_dir_all(entry.path()).is_ok() {
+                    let status = if cfg!(target_os = "windows") {
+                        let s = runas::Command::new("powershell")
+                            .arg("-Command")
+                            .arg(format!(
+                                "Remove-Item -LiteralPath '{}' -Force -Recurse",
+                                entry.path().display()
+                            ))
+                            .status()?;
+
+                        if s.success() { true } else { false }
+                    } else {
+                        let s = PrivilegedCommand::new("rm")
+                            .arg("-f")
+                            .arg(entry.path().display().to_string())
+                            .gui(true)
+                            .prompt(format!(
+                                "O programa precisa de permissão para remover o arquivo: {}",
+                                entry.path().display()
+                            ))
+                            .run()?;
+
+                        if s.success() { true } else { false }
+                    };
+
+                    if !status {
+                        println!("Aviso, a remoção falhou para a pasta {}", entry.path().display());
+                    }
+                }
             }
         }
 
